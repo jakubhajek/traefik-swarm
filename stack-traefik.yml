@@ -1,0 +1,90 @@
+# Maintainer: jakub.hajek@cometari.com @_jakubhajek
+# docker stack deploy -c stack-traefik.yml proxy --with-registry-auth --prune
+version: "3.7"
+
+services:
+  traefik:
+    image: traefik:2.0.2
+    command:
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--log.level=INFO"
+      - "--providers.docker=true"
+      - "--providers.docker.watch=true"
+      - "--providers.docker.swarmmode=true"
+      - "--providers.docker.network=proxy"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.swarmModeRefreshSeconds=15s"
+      - "--api"
+      - "--providers.docker.exposedbydefault=false"
+      # Create mechanism to generate certifiacte called "LE"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      - "--certificatesresolvers.le.acme.email=kuba@cometari.com"
+      # Store obtained certificates on the given storage
+      - "--certificatesresolvers.le.acme.storage=/le/acme.json"
+    networks:
+      - proxy
+    ports:
+      # - target: 80
+      #   published:  80
+      #   mode: host
+      # - target: 443
+      #   published: 443
+      #   mode: host
+      - "80:80"
+      - "443:443"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+          - node.labels.traefik == true
+        preferences:
+          - spread: node.id
+      labels:
+        - "traefik.enable=true" # Enable Traefik, because we disabled expose a service by default
+        - "traefik.http.routers.t.rule=Host(`traefik.labs.cometari.eu`)" # Tell Traefik to create routre 't' and catch all requests with given Host (http header: Host)
+        - "traefik.http.routers.t.service=api@internal" # the router 't' will forward request to service api@internal
+        - "traefik.http.routers.t.tls.certresolver=le" # the router 't' will use TLS certresolver called LE
+        - "traefik.http.routers.t.entrypoints=websecure,web" # the router 't' should listen on both entrypoints
+        - "traefik.http.services.t.loadbalancer.server.port=8080" # the router 't' will balance incoming requests between servers listens on port 8080
+        - "traefik.http.services.t.loadbalancer.passhostheader=true"
+        - "traefik.http.routers.t.middlewares=authtraefik" # Tell Traefik, that for router 't' should use following middleware
+        - "traefik.http.middlewares.authtraefik.basicauth.users=admin:$$2y$$05$$1OX5jZ1Kpm/iVKE8tgUhu.STmPkgi0lLxVeP5yEcRioFdV4mcgdTu" #  Tell Traefik to creat middleware for the give name with following credntails (bcrypt)
+        - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"    # global redirect to https
+        - "traefik.http.routers.http-catchall.entrypoints=web"
+        - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+        - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "cert:/le"
+  
+  visualizer:
+    image: dockersamples/visualizer
+    networks:
+      - proxy
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.viz.rule=Host(`viz.labs.cometari.eu`)"
+        - "traefik.http.routers.viz.tls.certresolver=le"
+        - "traefik.http.services.viz.loadbalancer.passhostheader=true"
+        - "traefik.http.services.viz.loadbalancer.server.port=8080"
+        - "traefik.http.routers.viz.middlewares=authtraefik"
+        - "traefik.http.middlewares.authtraefik.basicauth.users=admin:$$2y$$05$$1OX5jZ1Kpm/iVKE8tgUhu.STmPkgi0lLxVeP5yEcRioFdV4mcgdTu" # admin/admin
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  cert:
+
+networks:
+  proxy:
+    driver: overlay
+    name: proxy
+    attachable: true
